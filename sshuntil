@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------
+# sshuntil – waits until SSH is ready, cleans known_hosts, adds new key, connects
+# ---------------------------
+
+SSH_USER="root"
+PASSWORD=""
+KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
+CHECK_INTERVAL=3
+MAX_WAIT=180
+SUBNET=""
+CONFIG_FILE="${HOME}/.config/sshuntil.conf"
+
+# load config
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+usage() {
+  echo "Usage: $0 <ip|hostnumber> [command]"
+  echo "Example: $0 192.168.28.194 'uptime'"
+  echo "         $0 194 'uptime'  # if SUBNET is set"
+  exit 1
+}
+
+is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+
+prefix_from_subnet() { echo "${1%.*}"; }
+
+[[ $# -lt 1 ]] && usage
+TARGET="$1"; shift
+CMD="${*:-}"
+
+if is_ip "$TARGET"; then
+  IP="$TARGET"
+elif [[ "$TARGET" =~ ^[0-9]{1,3}$ ]] && [[ -n "$SUBNET" ]]; then
+  BASE=$(prefix_from_subnet "$SUBNET")
+  IP="${BASE}.${TARGET}"
+else
+  echo "[ERROR] Invalid target or missing SUBNET in config" >&2
+  usage
+fi
+
+echo "[INFO] Waiting for SSH on ${IP} ..."
+START=$(date +%s)
+until nc -w2 -z "$IP" 22 >/dev/null 2>&1; do
+  NOW=$(date +%s)
+  (( NOW - START > MAX_WAIT )) && { echo "[ERROR] Timeout after ${MAX_WAIT}s"; exit 124; }
+  sleep "$CHECK_INTERVAL"
+  echo -n "."
+done
+echo " [OK]"
+
+mkdir -p "$(dirname "$KNOWN_HOSTS")"
+touch "$KNOWN_HOSTS"; chmod 600 "$KNOWN_HOSTS" || true
+
+ssh-keygen -R "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+ssh-keyscan -T 5 -H "$IP" >> "$KNOWN_HOSTS" 2>/dev/null || {
+  echo "[ERROR] Could not fetch host key from ${IP}" >&2
+  exit 69
+}
+
+echo "[INFO] Connecting to ${SSH_USER}@${IP} ..."
+if [[ -n "$PASSWORD" ]]; then
+  sshpass -p "$PASSWORD" ssh \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o StrictHostKeyChecking=yes \
+    "${SSH_USER}@${IP}" ${CMD}
+else
+  ssh \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o StrictHostKeyChecking=yes \
+    "${SSH_USER}@${IP}" ${CMD}
+fi
