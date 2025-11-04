@@ -17,9 +17,15 @@ Perfect for automated deployments, VM resets, or network devices that take a whi
 ---
 
 ## ⚙️ Installation
+Clone the repository and install the script:
 ```bash
 sudo cp sshuntil /usr/local/bin/
 sudo chmod +x /usr/local/bin/sshuntil
+```
+
+If you plan to use password authentication, install **sshpass**:
+```bash
+sudo apt install sshpass
 ```
 
 ---
@@ -31,7 +37,7 @@ Example: `~/.config/sshuntil.conf`
 ```bash
 SUBNET="192.168.28.0/24"
 SSH_USER="root"
-PASSWORD=""
+PASSWORD=""                   # optional, requires sshpass if used
 KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
 CHECK_INTERVAL=3
 MAX_WAIT=180
@@ -51,7 +57,10 @@ sshuntil 194 "uptime"
 ## 📦 Dependencies
 - `bash`
 - `nc` (netcat)
-- `ssh`, `sshpass`, `ssh-keyscan`, `ssh-keygen`
+- `ssh`
+- `ssh-keyscan`
+- `ssh-keygen`
+- **`sshpass`** (optional, required for password-based login)
 
 ---
 
