@@ -62,7 +62,7 @@ Given a configured or auto-detected SUBNET of `192.168.28.0/24`:
 |-------|------------|-------------|
 | `194` | `192.168.28.194` | Uses full SUBNET prefix + host number |
 | `21.11` | `192.168.21.11` | Uses first two octets from SUBNET |
-| `10.0.50` | `10.0.0.50` | Uses first octet from SUBNET |
+| `10.0.50` | `192.10.0.50` | Uses first octet from SUBNET |
 | `10.0.5.100` | `10.0.5.100` | Full IP, used as-is |
 
 ## Configuration
