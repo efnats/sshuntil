@@ -195,7 +195,7 @@ until nc -w2 -z "$IP" 22 >/dev/null 2>&1; do
   sleep "$CHECK_INTERVAL"
   echo -n "."
 done
-echo " [OK]"
+echo -e "\r[INFO] Waiting for SSH (${IP}:22) ... [OK]"
 
 # ---- Prepare known_hosts ----
 mkdir -p "$(dirname "$KNOWN_HOSTS")"
