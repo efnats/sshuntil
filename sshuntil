@@ -5,7 +5,7 @@ set -euo pipefail
 # Defaults (override via config)
 # ---------------------------
 SSH_USER="root"
-PASSWORD=""                 # empty = key-based login; otherwise e.g. "password123"
+PASSWORD=""                 # empty = key-based login; otherwise e.g. "grmlrocks"
 KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
 CHECK_INTERVAL=3            # seconds between port checks
 MAX_WAIT=180                # total timeout in seconds (exit 124 on timeout)
@@ -202,35 +202,35 @@ mkdir -p "$(dirname "$KNOWN_HOSTS")"
 touch "$KNOWN_HOSTS"
 chmod 600 "$KNOWN_HOSTS" || true
 
-# Fetch new host key
-echo "[INFO] Fetching SSH host key ..."
-NEW_KEY=$(ssh-keyscan -T 5 -H "$IP" 2>/dev/null) || {
-  echo "[ERROR] Could not fetch host key from $IP." >&2
-  exit 69
-}
-
-# Check if there's a conflicting key
+# Check if key already exists and is valid
 if ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1; then
-  # Key exists, check if it matches
-  TEMP_HOSTS=$(mktemp)
-  echo "$NEW_KEY" > "$TEMP_HOSTS"
-  
-  if ! ssh-keygen -F "$IP" -f "$TEMP_HOSTS" >/dev/null 2>&1 || \
-     ! diff <(ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" 2>/dev/null | grep -v '^#') \
-            <(ssh-keygen -F "$IP" -f "$TEMP_HOSTS" 2>/dev/null | grep -v '^#') >/dev/null 2>&1; then
-    # Keys differ - remove old key
-    echo "[WARN] Host key mismatch detected, removing old key for $IP"
-    ssh-keygen -R "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
-    echo "$NEW_KEY" >> "$KNOWN_HOSTS"
-  else
+  # Key exists - test if SSH accepts it
+  echo "[INFO] Testing existing host key ..."
+  if ssh -o UserKnownHostsFile="$KNOWN_HOSTS" \
+         -o StrictHostKeyChecking=yes \
+         -o ConnectTimeout=5 \
+         -o BatchMode=yes \
+         "${SSH_USER}@${IP}" "exit" >/dev/null 2>&1; then
     echo "[INFO] Host key already known and valid"
+  else
+    # Connection failed - likely key mismatch
+    echo "[WARN] Host key mismatch detected, updating key for $IP"
+    ssh-keygen -R "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+    
+    echo "[INFO] Fetching new SSH host key ..."
+    if ! ssh-keyscan -T 5 -H "$IP" >> "$KNOWN_HOSTS" 2>/dev/null; then
+      echo "[ERROR] Could not fetch host key from $IP." >&2
+      exit 69
+    fi
   fi
-  
-  rm -f "$TEMP_HOSTS"
 else
-  # No existing key, add new one
-  echo "[INFO] Adding new host key"
-  echo "$NEW_KEY" >> "$KNOWN_HOSTS"
+  # No existing key
+  echo "[INFO] Fetching SSH host key ..."
+  if ! ssh-keyscan -T 5 -H "$IP" >> "$KNOWN_HOSTS" 2>/dev/null; then
+    echo "[ERROR] Could not fetch host key from $IP." >&2
+    exit 69
+  fi
+  echo "[INFO] Added new host key"
 fi
 
 # ---- Connect ----
