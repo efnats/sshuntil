@@ -1,173 +1,274 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ===================================================================
-# sshuntil - Wait for SSH and connect
+# sshuntil - Enhanced SSH Connection Tool
 # ===================================================================
+
+VERSION="1.0.0"
+
+# ---------------------------
+# Defaults (override via config)
+# ---------------------------
+SSH_USER="root"
+PASSWORD=""                 # empty = key-based login; otherwise e.g. "grmlrocks"
+KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
+CHECK_INTERVAL=3            # seconds between port checks
+MAX_WAIT=180                # total timeout in seconds (exit 124 on timeout)
+SUBNET=""                   # e.g. "192.168.28.0" or "192.168.28.0/24"
+# ---------------------------
+
+# Load config (later file overrides earlier)
+SUBNET_SOURCE=""
+for cfg in /etc/sshuntil.conf "${HOME}/.config/sshuntil.conf"; do
+  if [[ -f "$cfg" ]]; then
+    # shellcheck disable=SC1090
+    source "$cfg"
+    # Remember source if SUBNET was set
+    [[ -n "$SUBNET" ]] && SUBNET_SOURCE="$cfg"
+  fi
+done
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS] <IP_OR_HOST>
+Usage: $(basename "$0") <ip|partial-ip|hostnr> [command]
 
-Waits until an SSH server is reachable and then connects.
+Examples:
+  $(basename "$0") 192.168.28.194
+  $(basename "$0") 194                # -> 192.168.28.194 (uses SUBNET)
+  $(basename "$0") 21.11              # -> 192.168.21.11 (uses SUBNET prefix)
+  $(basename "$0") 10.0.50            # -> 192.10.0.50 (uses first octet from SUBNET)
+  $(basename "$0") 10.0.5.100         # -> 10.0.5.100 (full IP)
+  $(basename "$0") 194 "uptime"       # executes remote command
 
-OPTIONS:
-  -h, --help     Show this help
-  -l USERNAME    SSH username (default: from config or \$USER)
-  -p PORT        SSH port (default: 22)
-  -w SECONDS     Max wait time (default: 300)
-  -i SECONDS     Check interval (default: 2)
+Config (optional):
+  /etc/sshuntil.conf or ~/.config/sshuntil.conf
+  Variables: SUBNET, SSH_USER, PASSWORD, KNOWN_HOSTS, CHECK_INTERVAL, MAX_WAIT
 
-EXAMPLES:
-  $(basename "$0") 42
-  $(basename "$0") -l root -w 600 192.168.28.100
-  $(basename "$0") -p 2222 myserver.local
-  $(basename "$0") -l admin 192.168.1.50
-
-EXIT CODES:
-  0    Success
-  2    Invalid arguments
-  69   Host key mismatch (removed and refetched)
-  111  SSH connection failed
-  124  Timeout
-
-CONFIGURATION:
-  /etc/sshuntil.conf and/or ~/.config/sshuntil.conf
-  Variables: SUBNET, PREFIX, MAX_WAIT, CHECK_INTERVAL, USERNAME, PASSWORD
+Exit codes:
+  0   Success
+  2   Invalid input
+  69  Could not fetch host key
+  111 SSH connection failed
+  124 Timeout (port 22 not reachable)
 EOF
+}
+
+# Handle --version / -V
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  echo "sshuntil $VERSION"
   exit 0
+fi
+
+# Handle --help / -h
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+is_ip() {
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r a b c d <<<"$1"
+  for n in "$a" "$b" "$c" "$d"; do
+    (( n >= 0 && n <= 255 )) || return 1
+  done
 }
 
-# ---- Load config files ----
-[[ -f /etc/sshuntil.conf ]] && source /etc/sshuntil.conf
-[[ -f ~/.config/sshuntil.conf ]] && source ~/.config/sshuntil.conf
-
-# ---- Defaults ----
-MAX_WAIT="${MAX_WAIT:-300}"
-CHECK_INTERVAL="${CHECK_INTERVAL:-2}"
-USERNAME="${USERNAME:-${USER:-$(whoami)}}"
-PASSWORD="${PASSWORD:-}"
-SSH_PORT="${SSH_PORT:-22}"
-
-# ---- Parse options ----
-while getopts ":hl:p:w:i:-:" opt; do
-  case "$opt" in
-    h) usage ;;
-    l) USERNAME="$OPTARG" ;;
-    p) SSH_PORT="$OPTARG" ;;
-    w) MAX_WAIT="$OPTARG" ;;
-    i) CHECK_INTERVAL="$OPTARG" ;;
-    -) case "$OPTARG" in
-         help) usage ;;
-         *) echo "[ERROR] Unknown option --$OPTARG" >&2; exit 2 ;;
-       esac ;;
-    :) echo "[ERROR] Option -$OPTARG requires an argument" >&2; exit 2 ;;
-    \?) echo "[ERROR] Unknown option -$OPTARG" >&2; exit 2 ;;
-  esac
-done
-shift $((OPTIND - 1))
-
-[[ $# -eq 0 ]] && { echo "[ERROR] Missing IP or host argument" >&2; usage; }
-INPUT="$1"
-
-# ---- Helper: extract SUBNET prefix (/24 etc. removed) ----
 prefix_from_subnet() {
-  local subnet="$1"
-  # Remove /XX if present
-  echo "${subnet%%/*}"
+  local s="${1%/*}"            # strip CIDR if present
+  [[ "$s" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  echo "${s%.*}"               # first three octets
 }
 
-# ---- Validate SUBNET if set ----
-if [[ -n "${SUBNET:-}" ]]; then
-  PREFIX=$(prefix_from_subnet "$SUBNET")
-  # Accept both 192.168.28 (3 octets) and 192.168.28.0 (4 octets)
-  if [[ ! "$PREFIX" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?$ ]]; then
-    echo "[ERROR] Invalid SUBNET prefix: $PREFIX" >&2
+detect_subnet() {
+  # Try to auto-detect current subnet
+  local detected=""
+  
+  # Method 1: ip route (preferred on Linux)
+  if command -v ip >/dev/null 2>&1; then
+    detected=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+  fi
+  
+  # Method 2: ifconfig (fallback for macOS/BSD)
+  if [[ -z "$detected" ]] && command -v ifconfig >/dev/null 2>&1; then
+    detected=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1' | head -1)
+  fi
+  
+  # Method 3: hostname -I (another alternative)
+  if [[ -z "$detected" ]] && command -v hostname >/dev/null 2>&1; then
+    detected=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  
+  if [[ -n "$detected" ]]; then
+    echo "${detected%.*}.0/24"  # subnet in CIDR format
+  fi
+}
+
+expand_ip() {
+  # Expands partial IP addresses based on SUBNET
+  # Examples:
+  #   194 -> 192.168.28.194
+  #   21.11 -> 192.168.21.11
+  #   10.0.50 -> 192.10.0.50 (uses first octet from SUBNET)
+  
+  local input="$1"
+  local subnet_base="$2"  # e.g. "192.168.28"
+  
+  # Count how many octets are present
+  local dots="${input//[^.]}"
+  local octets=$((${#dots} + 1))
+  
+  case $octets in
+    1)
+      # Only host number: 194 -> 192.168.28.194
+      echo "${subnet_base}.${input}"
+      ;;
+    2)
+      # Two octets: 21.11 -> 192.168.21.11
+      IFS=. read -r o3 o4 <<<"$input"
+      IFS=. read -r b1 b2 _ <<<"$subnet_base"
+      echo "${b1}.${b2}.${o3}.${o4}"
+      ;;
+    3)
+      # Three octets: 10.0.50 -> 192.10.0.50
+      IFS=. read -r o2 o3 o4 <<<"$input"
+      IFS=. read -r b1 _ _ <<<"$subnet_base"
+      echo "${b1}.${o2}.${o3}.${o4}"
+      ;;
+    4)
+      # Full IP, return as-is
+      echo "$input"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_octets() {
+  # Checks if all octets are in valid range
+  local ip="$1"
+  IFS=. read -r a b c d <<<"$ip"
+  for n in "$a" "$b" "$c" "$d"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    (( n >= 0 && n <= 255 )) || return 1
+  done
+  return 0
+}
+
+# ---- Args ----
+[[ $# -ge 1 ]] || { usage; exit 2; }
+TARGET="$1"; shift
+REMOTE_CMD="${*:-}"
+
+# ---- Determine target IP ----
+IP=""
+
+# Ensure SUBNET is available
+if [[ -z "$SUBNET" ]]; then
+  SUBNET=$(detect_subnet)
+  if [[ -z "$SUBNET" ]]; then
+    echo "[ERROR] Could not auto-detect subnet. Please set SUBNET in config." >&2
     exit 2
   fi
-  for octet in ${PREFIX//./ }; do
-    if (( octet < 0 || octet > 255 )); then
-      echo "[ERROR] Invalid SUBNET octet: $octet in $PREFIX" >&2
-      exit 2
-    fi
-  done
-  # If 4 octets given, strip the last one for prefix
-  if [[ "$PREFIX" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-    PREFIX="${PREFIX%.*}"
+  SUBNET_SOURCE="auto-detection"
+  echo "[INFO] Subnet: $SUBNET (via auto-detection)"
+elif [[ -n "$SUBNET_SOURCE" ]]; then
+  echo "[INFO] Subnet: $SUBNET (via config: $SUBNET_SOURCE)"
+else
+  echo "[INFO] Subnet: $SUBNET (via config)"
+fi
+
+# Extract subnet base (e.g. "192.168.28" from "192.168.28.0/24")
+SUBNET_BASE=$(prefix_from_subnet "$SUBNET") || { 
+  echo "[ERROR] Invalid SUBNET: $SUBNET" >&2
+  exit 2
+}
+
+# Check if TARGET is already a full, valid IP
+if is_ip "$TARGET" && validate_octets "$TARGET"; then
+  IP="$TARGET"
+else
+  # Try to expand TARGET as partial IP
+  IP=$(expand_ip "$TARGET" "$SUBNET_BASE") || {
+    echo "[ERROR] Invalid IP specification: $TARGET" >&2
+    usage
+    exit 2
+  }
+  
+  # Validate expanded IP
+  if ! validate_octets "$IP"; then
+    echo "[ERROR] Expanded IP invalid: $IP (from $TARGET)" >&2
+    exit 2
   fi
-else
-  PREFIX=""
+  
+  echo "[INFO] Expanded IP: $TARGET -> $IP"
 fi
-
-# ---- Determine IP ----
-if [[ "$INPUT" =~ ^[0-9]+$ ]]; then
-  [[ -z "$PREFIX" ]] && { echo "[ERROR] SUBNET not configured for short notation" >&2; exit 2; }
-  HOST="$INPUT"
-  (( HOST < 1 || HOST > 254 )) && { echo "[ERROR] Host number must be 1-254" >&2; exit 2; }
-  IP="${PREFIX}.${HOST}"
-elif [[ "$INPUT" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-  for octet in ${INPUT//./ }; do
-    (( octet < 0 || octet > 255 )) && { echo "[ERROR] Invalid IP octet: $octet" >&2; exit 2; }
-  done
-  IP="$INPUT"
-else
-  IP="$INPUT"
-fi
-
-echo "[INFO] Target: ${USERNAME}@${IP}:${SSH_PORT}"
 
 # ---- Wait for SSH to be ready ----
-echo "[INFO] Waiting for SSH (${IP}:${SSH_PORT}) ..."
+echo -n "[INFO] Waiting for SSH (${IP}:22) ..."
 start=$(date +%s)
-until nc -w2 -z "$IP" "$SSH_PORT" >/dev/null 2>&1; do
+until nc -w2 -z "$IP" 22 >/dev/null 2>&1; do
   now=$(date +%s)
-  (( now - start > MAX_WAIT )) && { echo "[ERROR] Timeout after ${MAX_WAIT}s." >&2; exit 124; }
+  (( now - start > MAX_WAIT )) && { echo ""; echo "[ERROR] Timeout after ${MAX_WAIT}s." >&2; exit 124; }
   sleep "$CHECK_INTERVAL"
   echo -n "."
 done
-echo -e "\r[INFO] Waiting for SSH (${IP}:${SSH_PORT}) ... [OK]"
+echo -e "\r[INFO] Waiting for SSH (${IP}:22) ... [OK]"
 
-# ---- Fetch host key ----
-echo "[INFO] Fetching host key..."
-ssh-keyscan -p "$SSH_PORT" -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
+# ---- Prepare known_hosts ----
+mkdir -p "$(dirname "$KNOWN_HOSTS")"
+touch "$KNOWN_HOSTS"
+chmod 600 "$KNOWN_HOSTS" || true
 
-# ---- Verify key by attempting connection ----
-echo "[INFO] Verifying host key..."
-set +e
-ssh -o BatchMode=yes -o ConnectTimeout=5 -p "$SSH_PORT" "${USERNAME}@${IP}" exit 2>/dev/null
-test_result=$?
-set -e
-
-if [[ $test_result -eq 255 ]]; then
-  echo "[WARN] Host key mismatch detected. Removing old key and refetching..."
-  ssh-keygen -f ~/.ssh/known_hosts -R "$IP" >/dev/null 2>&1 || true
-  [[ "$SSH_PORT" != "22" ]] && ssh-keygen -f ~/.ssh/known_hosts -R "[$IP]:$SSH_PORT" >/dev/null 2>&1 || true
-  ssh-keyscan -p "$SSH_PORT" -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
-  echo "[INFO] Host key updated (exit 69 for automation awareness)"
+# Fetch new host key
+echo "[INFO] Fetching SSH host key ..."
+NEW_KEY=$(ssh-keyscan -T 5 -H "$IP" 2>/dev/null) || {
+  echo "[ERROR] Could not fetch host key from $IP." >&2
   exit 69
+}
+
+# Check if there's an existing key for this IP
+if ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1; then
+  # Key exists - check if it matches the new key
+  # Extract just the key part (without comments/hostnames)
+  OLD_KEY=$(ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" 2>/dev/null | grep -v '^#' | head -1)
+  
+  # Normalize both keys for comparison (extract key type and key data)
+  OLD_KEY_DATA=$(echo "$OLD_KEY" | awk '{print $2" "$3}')
+  NEW_KEY_DATA=$(echo "$NEW_KEY" | awk '{print $2" "$3}')
+  
+  if [[ "$OLD_KEY_DATA" == "$NEW_KEY_DATA" ]]; then
+    echo "[INFO] Host key already known and valid"
+  else
+    # Keys differ - remove old key and add new one
+    echo "[WARN] Host key mismatch detected, removing old key for $IP"
+    ssh-keygen -R "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+    echo "$NEW_KEY" >> "$KNOWN_HOSTS"
+  fi
+else
+  # No existing key, add new one
+  echo "[INFO] Adding new host key"
+  echo "$NEW_KEY" >> "$KNOWN_HOSTS"
 fi
 
-# ---- Connect via SSH ----
-echo "[INFO] Connecting to ${USERNAME}@${IP}:${SSH_PORT} ..."
-
-ssh_opts=(-o ConnectTimeout=10 -p "$SSH_PORT")
-
+# ---- Connect ----
+echo "[INFO] Connecting to ${SSH_USER}@${IP} ..."
+set +e
 if [[ -n "$PASSWORD" ]]; then
   command -v sshpass >/dev/null 2>&1 || { echo "[ERROR] sshpass not found but PASSWORD is set" >&2; exit 111; }
-  set +e
-  sshpass -p "$PASSWORD" ssh "${ssh_opts[@]}" "${USERNAME}@${IP}"
-  rc=$?
-  set -e
+  sshpass -p "$PASSWORD" ssh \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 \
+    "${SSH_USER}@${IP}" ${REMOTE_CMD}
 else
-  set +e
-  ssh "${ssh_opts[@]}" "${USERNAME}@${IP}"
-  rc=$?
-  set -e
+  ssh \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 \
+    "${SSH_USER}@${IP}" ${REMOTE_CMD}
 fi
-
-if [[ $rc -ne 0 ]]; then
-  echo "[ERROR] SSH connection failed (rc=$rc)" >&2
-  exit 111
-fi
-
-exit 0
+rc=$?
+set -e
+(( rc == 0 )) || { echo "[ERROR] SSH failed (rc=$rc)." >&2; exit 111; }
