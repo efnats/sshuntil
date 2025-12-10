@@ -5,7 +5,7 @@ set -euo pipefail
 # sshuntil - Enhanced SSH Connection Tool
 # ===================================================================
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ---------------------------
 # Defaults (override via config)
@@ -31,15 +31,18 @@ done
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <ip|partial-ip|hostnr> [command]
+Usage: $(basename "$0") [user] <ip|partial-ip|hostnr> [command]
+       $(basename "$0") [-l user] <ip|partial-ip|hostnr> [command]
 
 Examples:
-  $(basename "$0") 192.168.28.194
-  $(basename "$0") 194                # -> 192.168.28.194 (uses SUBNET)
-  $(basename "$0") 21.11              # -> 192.168.21.11 (uses SUBNET prefix)
-  $(basename "$0") 10.0.50            # -> 192.10.0.50 (uses first octet from SUBNET)
-  $(basename "$0") 10.0.5.100         # -> 10.0.5.100 (full IP)
-  $(basename "$0") 194 "uptime"       # executes remote command
+  $(basename "$0") 194                # -> SSH_USER@192.168.28.194
+  $(basename "$0") root 194           # -> root@192.168.28.194
+  $(basename "$0") -l root 194        # -> root@192.168.28.194 (same as above)
+  $(basename "$0") 21.11              # -> SSH_USER@192.168.21.11
+  $(basename "$0") admin 21.11        # -> admin@192.168.21.11
+  $(basename "$0") 10.0.50            # -> SSH_USER@192.10.0.50
+  $(basename "$0") 10.0.5.100         # -> SSH_USER@10.0.5.100 (full IP)
+  $(basename "$0") root 194 "uptime"  # executes remote command
 
 Config (optional):
   /etc/sshuntil.conf or ~/.config/sshuntil.conf
@@ -65,6 +68,17 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   usage
   exit 0
 fi
+
+# ---- Parse options ----
+CLI_USER=""
+while getopts ":l:" opt; do
+  case "$opt" in
+    l) CLI_USER="$OPTARG" ;;
+    :) echo "[ERROR] Option -$OPTARG requires an argument" >&2; exit 2 ;;
+    \?) break ;;  # Unknown option, might be negative number - stop parsing
+  esac
+done
+shift $((OPTIND - 1))
 
 is_ip() {
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -158,8 +172,13 @@ validate_octets() {
 
 # ---- Args ----
 [[ $# -ge 1 ]] || { usage; exit 2; }
+
+# If second arg is IP-like (starts with digit), first is username
+[[ ${2:-} =~ ^[0-9] ]] && { CLI_USER="${CLI_USER:-$1}"; shift; }
+
 TARGET="$1"; shift
 REMOTE_CMD="${*:-}"
+[[ -n "$CLI_USER" ]] && SSH_USER="$CLI_USER"
 
 # ---- Determine target IP ----
 IP=""
