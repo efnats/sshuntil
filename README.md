@@ -7,6 +7,7 @@ Enhanced SSH connection tool that waits for SSH availability, manages host keys 
 - ⏱️ **Smart waiting**: Polls port 22 until SSH is ready (configurable timeout)
 - 🔑 **Intelligent key management**: Only removes conflicting host keys, preserves valid ones
 - 🌐 **Flexible IP notation**: Use full IPs, partial IPs, or just host numbers
+- 👤 **Quick username**: Just type `sshuntil root 15` – no flags needed
 - 🔍 **Subnet auto-detection**: Automatically detects your current subnet if not configured
 - 🔐 **Password support**: Supports both key-based and password authentication (via sshpass)
 - ⚙️ **Configurable**: System-wide and user-specific configuration files
@@ -20,6 +21,9 @@ chmod +x sshuntil
 
 # Optional: Move to PATH
 sudo mv sshuntil /usr/local/bin/
+
+# Check version
+sshuntil --version
 ```
 
 ### Dependencies
@@ -47,11 +51,32 @@ sshuntil 21.11
 
 # Three octets (replaces last three octets of SUBNET)
 sshuntil 10.0.50
-# → connects to 10.0.0.50
+# → connects to 192.10.0.50
+```
 
-# Execute remote command
+### Specifying Username
+
+```bash
+# These are equivalent:
+sshuntil root 15
+sshuntil -l root 15
+# → connects as root@192.168.28.15
+
+# With partial IPs
+sshuntil admin 21.11
+# → connects as admin@192.168.21.11
+
+# Without username: uses SSH_USER from config (default: root)
+sshuntil 15
+```
+
+### Remote Commands
+
+```bash
+# Execute command on remote host
 sshuntil 194 "uptime"
-sshuntil 21.11 "df -h"
+sshuntil root 15 "df -h"
+sshuntil admin 21.11 "systemctl status nginx"
 ```
 
 ### How Partial IPs Work
@@ -126,14 +151,22 @@ This prevents unnecessary key removals while still handling host key changes (e.
 ### Live System Deployment
 ```bash
 # Wait for freshly booted GRML live system
-sshuntil 192.168.28.194 "grml-version"
+sshuntil 194 "grml-version"
+```
+
+### Quick Admin Access
+```bash
+# Connect as different users
+sshuntil root 15
+sshuntil admin 15
+sshuntil deploy 21.50
 ```
 
 ### Automated Server Setup
 ```bash
 #!/bin/bash
 # Wait for server and run setup
-sshuntil 50 "apt update && apt upgrade -y"
+sshuntil root 50 "apt update && apt upgrade -y"
 ```
 
 ### Network Range Management
@@ -191,7 +224,3 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 ## License
 
 MIT License - see repository for details
-
-## Author
-
-Created for streamlined SSH connections in development and deployment workflows.
