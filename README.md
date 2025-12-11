@@ -1,16 +1,28 @@
 # sshuntil
 
-Enhanced SSH connection tool that waits for SSH availability, manages host keys intelligently, and supports flexible IP notation.
+Wait for SSH to become available, then connect.
+
+```
+$ sshuntil root 10
+[INFO] Subnet: 192.168.28.0/24 (via auto-detection)
+[INFO] Expanded IP: 10 -> 192.168.28.10
+[INFO] Waiting for SSH (192.168.28.10:22) ...... [OK]
+[INFO] Fetching SSH host key ...
+[INFO] Host key already known and valid
+[INFO] Connecting to root@192.168.28.10 ...
+root@grml ~ #
+```
+
+Perfect for freshly booted systems, rebooting servers, or deployment workflows.
 
 ## Features
 
-- ⏱️ **Smart waiting**: Polls port 22 until SSH is ready (configurable timeout)
-- 🔑 **Intelligent key management**: Only removes conflicting host keys, preserves valid ones
-- 🌐 **Flexible IP notation**: Use full IPs, partial IPs, or just host numbers
-- 👤 **Quick username**: Just type `sshuntil root 15` – no flags needed
-- 🔍 **Subnet auto-detection**: Automatically detects your current subnet if not configured
-- 🔐 **Password support**: Supports both key-based and password authentication (via sshpass)
-- ⚙️ **Configurable**: System-wide and user-specific configuration files
+- ⏱️ **Waits for SSH**: Polls until port 22 is ready – ideal after reboot or fresh deployment
+- 🌐 **Flexible IP notation**: Just type `15` instead of `192.168.28.15`
+- 👤 **Quick username**: `sshuntil root 15` – no `-l` flag needed
+- 🔑 **Smart host keys**: Only updates on mismatch, no manual `known_hosts` cleanup
+- 🔍 **Subnet auto-detection**: Works without config on most setups
+- ⚙️ **Configurable**: Timeouts, default user, passwords via config files
 
 ## Installation
 
@@ -145,46 +157,6 @@ This prevents unnecessary key removals while still handling host key changes (e.
 | `69` | Could not fetch SSH host key |
 | `111` | SSH connection failed |
 | `124` | Timeout waiting for SSH port |
-
-## Use Cases
-
-### Live System Deployment
-```bash
-# Wait for freshly booted GRML live system
-sshuntil 194 "grml-version"
-```
-
-### Quick Admin Access
-```bash
-# Connect as different users
-sshuntil root 15
-sshuntil admin 15
-sshuntil deploy 21.50
-```
-
-### Automated Server Setup
-```bash
-#!/bin/bash
-# Wait for server and run setup
-sshuntil root 50 "apt update && apt upgrade -y"
-```
-
-### Network Range Management
-```bash
-# Connect to different hosts in the same subnet
-for i in {10..20}; do
-  sshuntil $i "hostname" &
-done
-wait
-```
-
-### Testing After Reboot
-```bash
-# Reboot and wait for SSH to come back
-ssh server "sudo reboot"
-sleep 5
-sshuntil server "uptime"
-```
 
 ## Troubleshooting
 
