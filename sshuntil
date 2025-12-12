@@ -5,7 +5,7 @@ set -euo pipefail
 # sshuntil - Enhanced SSH Connection Tool
 # ===================================================================
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # ---------------------------
 # Defaults (override via config)
@@ -249,15 +249,22 @@ NEW_KEY=$(ssh-keyscan -T 5 -H "$IP" 2>/dev/null) || {
 
 # Check if there's an existing key for this IP
 if ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" >/dev/null 2>&1; then
-  # Key exists - check if it matches the new key
-  # Extract just the key part (without comments/hostnames)
-  OLD_KEY=$(ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" 2>/dev/null | grep -v '^#' | head -1)
+  # Key exists - check if it matches any of the new keys
+  # Extract key type and data from stored key (field 2 = type, field 3 = key)
+  OLD_KEY_DATA=$(ssh-keygen -F "$IP" -f "$KNOWN_HOSTS" 2>/dev/null | grep -v '^#' | head -1 | awk '{print $2" "$3}')
   
-  # Normalize both keys for comparison (extract key type and key data)
-  OLD_KEY_DATA=$(echo "$OLD_KEY" | awk '{print $2" "$3}')
-  NEW_KEY_DATA=$(echo "$NEW_KEY" | awk '{print $2" "$3}')
+  # Check if old key matches any of the newly fetched keys
+  KEY_VALID=false
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    LINE_KEY_DATA=$(echo "$line" | awk '{print $2" "$3}')
+    if [[ "$OLD_KEY_DATA" == "$LINE_KEY_DATA" ]]; then
+      KEY_VALID=true
+      break
+    fi
+  done <<< "$NEW_KEY"
   
-  if [[ "$OLD_KEY_DATA" == "$NEW_KEY_DATA" ]]; then
+  if $KEY_VALID; then
     echo "[INFO] Host key already known and valid"
   else
     # Keys differ - remove old key and add new one
